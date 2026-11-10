@@ -1,6 +1,6 @@
 
 {
-  "model": "gemini-2.5-flash-lite",
+  "model": "openai/gpt-oss-20b",
 
   "channel_name": "PROFIT CODE",
 
