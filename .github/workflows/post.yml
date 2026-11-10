@@ -1,14 +1,17 @@
+
 name: Telegram autopost
 
 on:
   schedule:
     - cron: "0 9 * * *"
     - cron: "0 17 * * *"
+
   workflow_dispatch:
     inputs:
       topic:
         description: "Своя тема (необязательно)"
         required: false
+
       dry_run:
         description: "Только сгенерировать, не постить (1 = да)"
         required: false
@@ -24,6 +27,7 @@ concurrency:
 jobs:
   post:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -32,15 +36,27 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check API configuration
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          test -n "$GROQ_API_KEY" || (echo "GROQ_API_KEY missing" && exit 1)
+          test -n "$TELEGRAM_BOT_TOKEN" || (echo "TELEGRAM_BOT_TOKEN missing" && exit 1)
+          test -n "$TELEGRAM_CHAT_ID" || (echo "TELEGRAM_CHAT_ID missing" && exit 1)
+          echo "All required secrets are configured."
 
       - name: Generate and post
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           FORCE_TOPIC: ${{ github.event.inputs.topic }}
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
         run: python post.py
 
       - name: Save history
