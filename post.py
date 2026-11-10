@@ -4,7 +4,7 @@
 
 """
 Telegram Content Engine
-Gemini API + Telegram Bot API
+Groq API + Telegram Bot API
 
 Python 3.10+
 """
@@ -23,6 +23,10 @@ from pathlib import Path
 import requests
 
 
+# --------------------------------------------------
+# CONFIGURATION
+# --------------------------------------------------
+
 ROOT = Path(__file__).parent
 
 CONFIG_PATH = ROOT / "config.json"
@@ -30,8 +34,11 @@ HISTORY_PATH = ROOT / "history.json"
 TRADES_PATH = ROOT / "trades.json"
 SIGNALS_PATH = ROOT / "signals.json"
 
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+DEFAULT_MODEL = "openai/gpt-oss-20b"
+
+API_TIMEOUT = 90
 TG_LIMIT = 4096
-GEMINI_TIMEOUT = 90
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,18 +57,24 @@ def load_json(path: Path, default):
         return default
 
     try:
-        with path.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        log.error("Ошибка чтения %s: %s", path.name, e)
+        with path.open("r", encoding="utf-8") as file:
+            return json.load(file)
+
+    except (json.JSONDecodeError, OSError) as error:
+        log.error("Ошибка чтения %s: %s", path.name, error)
         return default
 
 
 def save_json(path: Path, data):
     temp = path.with_suffix(path.suffix + ".tmp")
 
-    with temp.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    with temp.open("w", encoding="utf-8") as file:
+        json.dump(
+            data,
+            file,
+            ensure_ascii=False,
+            indent=2
+        )
 
     temp.replace(path)
 
@@ -71,18 +84,34 @@ def save_json(path: Path, data):
 # --------------------------------------------------
 
 def get_trading_statistics():
+
     trades = load_json(TRADES_PATH, [])
 
+    if not isinstance(trades, list):
+        trades = []
+
     valid = [
-        t for t in trades
-        if t.get("result") in ("win", "loss")
+        trade for trade in trades
+        if isinstance(trade, dict)
+        and trade.get("result") in ("win", "loss")
     ]
 
-    wins = sum(1 for t in valid if t["result"] == "win")
-    losses = sum(1 for t in valid if t["result"] == "loss")
+    wins = sum(
+        1 for trade in valid
+        if trade["result"] == "win"
+    )
+
+    losses = sum(
+        1 for trade in valid
+        if trade["result"] == "loss"
+    )
+
     total = len(valid)
 
-    win_rate = round(wins / total * 100, 2) if total else None
+    win_rate = (
+        round(wins / total * 100, 2)
+        if total else None
+    )
 
     return {
         "total": total,
@@ -93,41 +122,59 @@ def get_trading_statistics():
 
 
 def get_recent_signals():
+
     signals = load_json(SIGNALS_PATH, [])
 
+    if not isinstance(signals, list):
+        return []
+
     return [
-        s for s in signals[-10:]
-        if s.get("verified") is True
+        signal for signal in signals[-10:]
+        if isinstance(signal, dict)
+        and signal.get("verified") is True
     ]
 
 
-def build_data_context(topic):
+def build_data_context():
+
     stats = get_trading_statistics()
     signals = get_recent_signals()
 
     context = []
 
     if stats["total"] > 0:
+
         context.append(
-            "ПОДТВЕРЖДЕННАЯ СТАТИСТИКА:\n"
+            "ФАКТИЧЕСКАЯ СТАТИСТИКА СДЕЛОК:\n"
             f"Всего сделок: {stats['total']}\n"
             f"Положительных: {stats['wins']}\n"
             f"Отрицательных: {stats['losses']}\n"
-            f"Проходимость: {stats['win_rate']}%"
+            f"Доля положительных сделок: {stats['win_rate']}%"
         )
+
     else:
+
         context.append(
             "Статистика сделок отсутствует. "
-            "Не создавай числовые показатели результатов."
+            "Не придумывай результаты и показатели."
         )
 
     if signals:
+
         context.append(
-            "ПОДТВЕРЖДЕННЫЕ СИГНАЛЫ:\n" +
-            json.dumps(signals, ensure_ascii=False, indent=2)
+            "ИСТОРИЧЕСКИЕ ПОДТВЕРЖДЕННЫЕ ДАННЫЕ:\n"
+            + json.dumps(
+                signals,
+                ensure_ascii=False,
+                indent=2
+            )
         )
+
     else:
-        context.append("Подтвержденных сигналов нет.")
+
+        context.append(
+            "Подтвержденных исторических сигналов нет."
+        )
 
     return "\n\n".join(context)
 
@@ -137,19 +184,23 @@ def build_data_context(topic):
 # --------------------------------------------------
 
 def pick_topic(cfg, history):
+
     topics = cfg.get("topics", [])
 
     if not topics:
-        raise ValueError("В config.json отсутствуют topics")
+        raise ValueError(
+            "В config.json отсутствует список topics"
+        )
 
     cooldown = min(
         len(topics) - 1,
-        int(cfg.get("topic_cooldown", 5))
+        max(0, int(cfg.get("topic_cooldown", 5)))
     )
 
     recent = {
-        h.get("topic")
-        for h in history[-cooldown:]
+        item.get("topic")
+        for item in history[-cooldown:]
+        if isinstance(item, dict)
     } if cooldown else set()
 
     available = [
@@ -161,33 +212,34 @@ def pick_topic(cfg, history):
 
 
 # --------------------------------------------------
-# GEMINI PROMPT
+# PROMPT
 # --------------------------------------------------
 
 def build_prompt(cfg, topic, history):
 
     last_posts = "\n---\n".join(
-        h.get("text", "")[:350]
-        for h in history[-5:]
+        item.get("text", "")[:350]
+        for item in history[-5:]
+        if isinstance(item, dict)
     )
 
     if not last_posts:
         last_posts = "Предыдущих публикаций нет."
 
-    trading_data = build_data_context(topic)
+    trading_data = build_data_context()
 
     categories = cfg.get("categories", {})
 
     return f"""
 ТЫ — ПРОФЕССИОНАЛЬНЫЙ TELEGRAM CONTENT MANAGER.
 
-Твоя задача — создавать качественный контент
-для Telegram-канала о бинарных опционах,
-финансовых рынках и платформе Pocket Option.
+Ты создаешь качественный контент для Telegram-канала
+о финансовых рынках, бинарных опционах,
+торговой психологии и платформе Pocket Option.
 
 ИНФОРМАЦИЯ О КАНАЛЕ:
 
-Название: {cfg.get('channel_name', 'Trading Community')}
+Название: {cfg.get('channel_name', 'PROFIT CODE')}
 
 Описание: {cfg.get('channel_description', '')}
 
@@ -195,21 +247,21 @@ def build_prompt(cfg, topic, history):
 
 Язык: {cfg.get('language', 'Русский')}
 
-Стиль: {cfg.get('tone', '')}
+Стиль: {cfg.get('tone', 'Уверенный, современный, лаконичный')}
 
-ТЕМА ТЕКУЩЕГО ПОСТА:
+ТЕКУЩАЯ ТЕМА:
 
 {topic}
 
-ДОСТУПНЫЕ КАТЕГОРИИ:
+КАТЕГОРИИ КОНТЕНТА:
 
 {json.dumps(categories, ensure_ascii=False, indent=2)}
 
-ДАННЫЕ ДЛЯ ПУБЛИКАЦИИ:
+ДАННЫЕ:
 
 {trading_data}
 
-ПРАВИЛА ГЕНЕРАЦИИ:
+ПРАВИЛА СОЗДАНИЯ КОНТЕНТА:
 
 1. Создавай интересные, разнообразные и содержательные
 публикации, а не шаблонные тексты.
@@ -273,84 +325,129 @@ def build_prompt(cfg, topic, history):
 
 
 # --------------------------------------------------
-# GEMINI API
+# GROQ API
 # --------------------------------------------------
 
 def generate_post(cfg, topic, history):
 
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("GROQ_API_KEY")
 
     if not api_key:
-        raise RuntimeError("Не задан GEMINI_API_KEY")
+        raise RuntimeError(
+            "Не задан GROQ_API_KEY в переменных окружения"
+        )
 
-    model = cfg.get("model", "gemini-2.5-flash")
+    model = cfg.get("model", DEFAULT_MODEL)
 
-    url = (
-        "https://generativelanguage.googleapis.com/"
-        f"v1beta/models/{model}:generateContent"
+    prompt = build_prompt(
+        cfg,
+        topic,
+        history
     )
-
-    prompt = build_prompt(cfg, topic, history)
 
     payload = {
-        "contents": [
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Ты профессиональный редактор Telegram-канала. "
+                    "Строго соблюдай инструкции пользователя. "
+                    "Не выдумывай факты и результаты."
+                )
+            },
             {
                 "role": "user",
-                "parts": [
-                    {"text": prompt}
-                ]
+                "content": prompt
             }
         ],
-        "generationConfig": {
-            "temperature": 0.85,
-            "maxOutputTokens": 2500
-        }
+        "temperature": 0.85,
+        "max_tokens": 2500
     }
 
-    response = requests.post(
-        url,
-        json=payload,
-        headers={
-            "x-goog-api-key": api_key,
-            "Content-Type": "application/json"
-        },
-        timeout=GEMINI_TIMEOUT
-    )
+    try:
+
+        response = requests.post(
+            GROQ_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=API_TIMEOUT
+        )
+
+    except requests.RequestException as error:
+
+        raise RuntimeError(
+            f"Ошибка подключения к Groq: {error}"
+        )
 
     if not response.ok:
+
+        try:
+            error_data = response.json()
+        except ValueError:
+            error_data = response.text[:1000]
+
         raise RuntimeError(
-            f"Gemini API error {response.status_code}: "
-            f"{response.text[:1000]}"
+            f"Groq API error {response.status_code}: "
+            f"{error_data}"
         )
 
-    data = response.json()
+    try:
+        data = response.json()
 
-    candidates = data.get("candidates", [])
-
-    if not candidates:
+    except ValueError:
         raise RuntimeError(
-            f"Gemini не вернул кандидатов: {data}"
+            "Groq вернул некорректный JSON"
         )
 
-    candidate = candidates[0]
+    choices = data.get("choices", [])
 
-    if candidate.get("finishReason") == "SAFETY":
-        raise RuntimeError("Gemini заблокировал генерацию по safety")
+    if not choices:
+        raise RuntimeError(
+            f"Groq не вернул choices: {data}"
+        )
 
-    parts = candidate.get("content", {}).get("parts", [])
+    message = choices[0].get("message", {})
+    generated_text = message.get("content", "")
 
-    text = "".join(
-        part.get("text", "")
-        for part in parts
+    if not isinstance(generated_text, str):
+        raise RuntimeError(
+            "Groq вернул ответ в неожиданном формате"
+        )
+
+    generated_text = generated_text.strip()
+
+    if not generated_text:
+        raise RuntimeError(
+            "Groq вернул пустой ответ"
+        )
+
+    # Удаляем возможные Markdown-обертки
+    generated_text = re.sub(
+        r"^```(?:html)?\s*|\s*```$",
+        "",
+        generated_text,
+        flags=re.IGNORECASE
     ).strip()
 
-    if not text:
-        raise RuntimeError("Gemini вернул пустой ответ")
+    max_chars = int(cfg.get("max_chars", 1200))
 
-    if len(text) > TG_LIMIT:
-        text = text[:TG_LIMIT - 3].rsplit(" ", 1)[0] + "..."
+    if len(generated_text) > max_chars:
 
-    return text
+        log.warning(
+            "Пост превышает max_chars: %s символов",
+            len(generated_text)
+        )
+
+        generated_text = (
+            generated_text[:max_chars - 3].rsplit(" ", 1)[0]
+            + "..."
+        )
+
+    return generated_text
 
 
 # --------------------------------------------------
@@ -359,32 +456,44 @@ def generate_post(cfg, topic, history):
 
 def validate_html(text):
 
-    allowed = {"b", "strong", "i", "em", "u", "s", "code", "pre", "a"}
+    allowed = {
+        "b", "strong",
+        "i", "em",
+        "u", "s",
+        "code", "pre",
+        "a"
+    }
 
-    tags = re.findall(r"<(/?)([a-zA-Z]+)([^>]*)>", text)
+    tags = re.findall(
+        r"<(/?)([a-zA-Z]+)([^>]*)>",
+        text
+    )
 
     stack = []
 
     for closing, name, attrs in tags:
+
         name = name.lower()
 
         if name not in allowed:
-            continue
+            return False
 
         if closing:
+
             if not stack or stack[-1] != name:
                 return False
+
             stack.pop()
+
         else:
+
             if name == "a":
+
                 if not re.search(
                     r'href\s*=\s*["\']https?://[^"\']+["\']',
                     attrs
                 ):
                     return False
-
-            if name in ("br",):
-                continue
 
             stack.append(name)
 
@@ -392,7 +501,9 @@ def validate_html(text):
 
 
 def plain_text(text):
+
     text = re.sub(r"<[^>]*>", "", text)
+
     return html.unescape(text)
 
 
@@ -400,19 +511,81 @@ def plain_text(text):
 # TELEGRAM PUBLISHER
 # --------------------------------------------------
 
-def send_to_telegram(text, image_path=None):
+def telegram_request(method, payload=None, files=None):
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
-    if not token or not chat_id:
+    if not token:
         raise RuntimeError(
-            "Не заданы TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID"
+            "Не задан TELEGRAM_BOT_TOKEN"
         )
 
-    base = f"https://api.telegram.org/bot{token}"
+    url = (
+        f"https://api.telegram.org/bot{token}/{method}"
+    )
 
+    try:
+
+        response = requests.post(
+            url,
+            data=payload if files else None,
+            json=payload if not files else None,
+            files=files,
+            timeout=60
+        )
+
+    except requests.RequestException as error:
+
+        raise RuntimeError(
+            f"Ошибка подключения к Telegram: {error}"
+        )
+
+    if not response.ok:
+
+        raise RuntimeError(
+            f"Telegram API error {response.status_code}: "
+            f"{response.text[:1000]}"
+        )
+
+    try:
+        result = response.json()
+
+    except ValueError:
+        raise RuntimeError(
+            "Telegram вернул некорректный JSON"
+        )
+
+    if not result.get("ok"):
+        raise RuntimeError(str(result))
+
+    return result
+
+
+def send_to_telegram(text, image_path=None):
+
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+    if not chat_id:
+        raise RuntimeError(
+            "Не задан TELEGRAM_CHAT_ID"
+        )
+
+    use_html = validate_html(text)
+
+    if not use_html:
+        log.warning(
+            "HTML не прошел проверку. Отправляю обычный текст."
+        )
+        text = plain_text(text)
+
+    if len(text) > TG_LIMIT:
+        raise RuntimeError(
+            "Пост превышает лимит Telegram в 4096 символов"
+        )
+
+    # Если есть изображение — отправляем его вместе с подписью
     if image_path:
+
         path = Path(image_path)
 
         if not path.is_file():
@@ -420,56 +593,39 @@ def send_to_telegram(text, image_path=None):
                 f"Изображение не найдено: {path}"
             )
 
+        payload = {
+            "chat_id": chat_id,
+            "caption": text,
+            "disable_notification": False
+        }
+
+        if use_html:
+            payload["parse_mode"] = "HTML"
+
         with path.open("rb") as photo:
-            response = requests.post(
-                f"{base}/sendPhoto",
-                data={
-                    "chat_id": chat_id
-                },
-                files={
-                    "photo": photo
-                },
-                timeout=60
+
+            result = telegram_request(
+                "sendPhoto",
+                payload=payload,
+                files={"photo": photo}
             )
 
-        response.raise_for_status()
+        return result
 
-        result = response.json()
-
-        if not result.get("ok"):
-            raise RuntimeError(str(result))
-
-    parse_mode = "HTML" if validate_html(text) else None
-
+    # Если изображения нет — обычная публикация
     payload = {
         "chat_id": chat_id,
         "text": text,
         "disable_web_page_preview": True
     }
 
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
-    else:
-        payload["text"] = plain_text(text)
+    if use_html:
+        payload["parse_mode"] = "HTML"
 
-    response = requests.post(
-        f"{base}/sendMessage",
-        json=payload,
-        timeout=30
+    return telegram_request(
+        "sendMessage",
+        payload=payload
     )
-
-    if not response.ok:
-        raise RuntimeError(
-            f"Telegram error {response.status_code}: "
-            f"{response.text}"
-        )
-
-    result = response.json()
-
-    if not result.get("ok"):
-        raise RuntimeError(str(result))
-
-    return result
 
 
 # --------------------------------------------------
@@ -480,14 +636,23 @@ def main():
 
     cfg = load_json(CONFIG_PATH, None)
 
-    if cfg is None:
-        raise RuntimeError("Не найден config.json")
+    if not isinstance(cfg, dict):
+        raise RuntimeError(
+            "Не найден или некорректен config.json"
+        )
 
     history = load_json(HISTORY_PATH, [])
 
+    if not isinstance(history, list):
+        history = []
+
     forced_topic = os.environ.get("FORCE_TOPIC")
 
-    topic = forced_topic or pick_topic(cfg, history)
+    topic = (
+        forced_topic
+        if forced_topic
+        else pick_topic(cfg, history)
+    )
 
     log.info("Выбрана тема: %s", topic)
 
@@ -503,16 +668,25 @@ def main():
     print(text)
     print("=" * 50 + "\n")
 
+    # Режим тестирования без публикации
     if os.environ.get("DRY_RUN") == "1":
-        log.info("DRY_RUN: публикация отменена")
+
+        log.info(
+            "DRY_RUN: генерация успешна, публикация отменена"
+        )
+
         return
 
-    image_path = os.environ.get("POST_IMAGE_PATH") or None
+    image_path = (
+        os.environ.get("POST_IMAGE_PATH") or None
+    )
 
     result = send_to_telegram(
         text,
         image_path=image_path
     )
+
+    message = result["result"]
 
     history.append({
         "date": datetime.now(timezone.utc).isoformat(
@@ -520,7 +694,7 @@ def main():
         ),
         "topic": topic,
         "text": text,
-        "message_id": result["result"]["message_id"]
+        "message_id": message["message_id"]
     })
 
     save_json(
@@ -528,12 +702,26 @@ def main():
         history[-100:]
     )
 
-    log.info("Публикация успешно отправлена")
+    log.info(
+        "Публикация успешно отправлена. Message ID: %s",
+        message["message_id"]
+    )
 
+
+# --------------------------------------------------
+# ENTRY POINT
+# --------------------------------------------------
 
 if __name__ == "__main__":
+
     try:
         main()
+
     except Exception as error:
-        log.exception("Ошибка выполнения: %s", error)
+
+        log.exception(
+            "Ошибка выполнения: %s",
+            error
+        )
+
         sys.exit(1)
