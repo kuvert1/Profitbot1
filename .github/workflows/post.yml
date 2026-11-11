@@ -1,4 +1,4 @@
-```yaml
+
 name: Telegram autopost
 
 on:
@@ -11,11 +11,13 @@ on:
       topic:
         description: "Своя тема (необязательно)"
         required: false
+        type: string
 
       dry_run:
         description: "Только сгенерировать, не постить (1 = да)"
         required: false
         default: "0"
+        type: string
 
 permissions:
   contents: write
@@ -57,14 +59,13 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          FORCE_TOPIC: ${{ github.event.inputs.topic }}
-          DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
+          FORCE_TOPIC: ${{ inputs.topic }}
+          DRY_RUN: ${{ inputs.dry_run || '0' }}
         run: python post.py
 
       - name: Save history
         run: |
           git config user.name "autoposter"
           git config user.email "autoposter@users.noreply.github.com"
-          git add history.json || true
+          git add history.json
           git diff --cached --quiet || (git commit -m "update history" && git push)
-```
